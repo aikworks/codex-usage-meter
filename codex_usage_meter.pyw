@@ -37,6 +37,12 @@ DIM = "#8a8d96"
 GREEN = "#4cc38a"
 YELLOW = "#e5b73b"
 RED = "#e5534b"
+LINK = "#6cb6ff"
+
+# 使用量ページ。Codex アプリの「設定 > 使用状況と請求」は codex:// のリンクで直接開けない
+# （2026-10 の版でリンクから開ける設定は browser-use・connections など7つだけ）ため、
+# アプリが中で使っているのと同じウェブ版のページを既定のブラウザで開く。
+USAGE_URL = "https://chatgpt.com/codex/settings/usage"
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
 SANS = "Yu Gothic UI" if IS_WIN else ("Hiragino Sans" if IS_MAC else "Noto Sans CJK JP")
@@ -149,6 +155,11 @@ class AppServer:
         self.proc = None
 
 
+def open_usage_page():
+    import webbrowser
+    webbrowser.open(USAGE_URL)
+
+
 def label_for(mins):
     if mins == 10080:
         return "週間"
@@ -222,6 +233,7 @@ class Meter:
 
         self.menu = tk.Menu(root, tearoff=0)
         self.menu.add_command(label="今すぐ更新", command=self.refresh)
+        self.menu.add_command(label="使用量ページを開く", command=open_usage_page)
         self.menu.add_command(label="最前面の切替", command=self.toggle_top)
         self.menu.add_separator()
         self.menu.add_command(label="終了", command=self.quit)
@@ -330,7 +342,13 @@ class Meter:
             foot += time.strftime("  %H:%M 更新", time.localtime(self.updated))
         if self.error and self.result:
             foot += "  ⚠ 更新失敗（前の値）"
-        self._row([(foot, DIM, (SANS, SIZE - 2))])
+        row = self._row([(foot, DIM, (SANS, SIZE - 2))])
+        # 「使用量ページを開く」はドラッグ用の割り当てを付けず、押したらブラウザで開くだけにする
+        link = tk.Label(row, text="使用量ページを開く", fg=LINK, bg=BG, font=(SANS, SIZE - 2, "underline"),
+                        bd=0, padx=0, pady=0, cursor="hand2")
+        link.pack(side="left", padx=(12, 0))
+        link.bind("<Button-1>", lambda e: open_usage_page())
+        link.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
         self._bind(self.frame)
 
     def _row(self, parts):
@@ -343,6 +361,7 @@ class Meter:
                            width=width[0] if width else 0, anchor="w")
             lbl.pack(side="left")
             self._bind(lbl)
+        return row
 
 
 def main():
