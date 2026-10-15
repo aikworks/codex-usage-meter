@@ -71,7 +71,7 @@ def log(msg):
 
 
 # ---- リセットの合図（X の投稿） ----
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 REPO_URL = "https://github.com/aikworks/codex-usage-meter"
 # 見るアカウントと役割。official＝予告・実施済の根拠にする（Tibo 氏と OpenAI 公式）。
 # omen＝予兆だけの根拠にする（元Codexリセット予報士 ついはじめ氏の予想・期待のメモ）。
@@ -165,6 +165,108 @@ def signal_state(posts, now):
     if omen and t(omen) > max(t(done), t(none)):
         return "omen", omen, events
     return None, None, events
+
+
+# ---- 前回のリセット（蓄積） ----
+# resets.json に、確かめたリセットを積み上げていく（消さない）。拾う元：
+#   detect …ついはじめ氏の「検知時刻 10/15 15:13 JST」など時刻つきの報告（いちばん正確）
+#   local  …このパソコンで、使用%の大きな低下や次のリセット予定の跳びから判断（ついはじめ氏と同じやり方）
+#   official … Tibo 氏・OpenAI 公式の実施の告知（告知した時刻）
+RESETS = os.path.join(HERE, "resets.json")
+SOURCE_RANK = {"detect": 0, "local": 1, "official": 2}
+SAME_RESET = 3 * 3600  # 3時間以内の記録は同じリセットとみなしてまとめる
+JST = None
+DETECT_RE = re.compile(r"(?:検知時刻|日本時間)\D{0,4}(\d{1,2})/(\d{1,2})\D{0,6}?(\d{1,2}):(\d{2})")
+
+
+def _jst():
+    global JST
+    if JST is None:
+        from datetime import timedelta, timezone
+        JST = timezone(timedelta(hours=9))
+    return JST
+
+
+def resets_from_posts(posts):
+    """投稿からリセットの記録を拾う（ついはじめ氏の時刻つきの報告と、公式の実施の告知）。"""
+    from datetime import datetime
+    found = []
+    for p in posts:
+        text = p["text"]
+        if p["user"] == "hajimetwi3" and ("検知時刻" in text or "リセット実施済" in text):
+            m = DETECT_RE.search(text)
+            if m:
+                year = datetime.fromtimestamp(p["ts"], _jst()).year
+                at = datetime(year, int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)),
+                              tzinfo=_jst()).timestamp()
+                if at <= p["ts"] + 600:  # 投稿より後の時刻（予定など）は記録にしない
+                    found.append({"at": at, "source": "detect", "by": "ついはじめ氏の検知", "url": p["url"]})
+        elif ROLES.get(p["user"]) == "official" and classify(text, p["user"]) == "done":
+            found.append({"at": p["ts"], "source": "official", "by": f"{NAMES[p['user']]}の告知", "url": p["url"]})
+    return found
+
+
+def merge_resets(history, new):
+    """同じリセット（3時間以内）は1件にまとめ、時刻は 検知 → このパソコン → 公式 の順で採る。"""
+    out = [dict(h) for h in history]
+    for n in new:
+        same = next((h for h in out if abs(h["at"] - n["at"]) <= SAME_RESET), None)
+        if same is None:
+            out.append(dict(n, sources=[n["by"]]))
+            continue
+        srcs = same.setdefault("sources", [same["by"]])
+        if n["by"] not in srcs:
+            srcs.append(n["by"])
+        if SOURCE_RANK[n["source"]] < SOURCE_RANK[same["source"]]:
+            same.update(at=n["at"], source=n["source"], by=n["by"], url=n.get("url", ""))
+    out.sort(key=lambda h: h["at"])
+    return out
+
+
+def load_resets():
+    try:
+        with open(RESETS, encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("resets", []), data.get("last_seen")
+    except (OSError, ValueError):
+        return [], None
+
+
+def save_resets(resets, last_seen):
+    try:
+        with open(RESETS, "w", encoding="utf-8") as f:
+            json.dump({"resets": resets, "last_seen": last_seen}, f, ensure_ascii=False, indent=1)
+    except OSError:
+        pass
+
+
+def detect_local_reset(last_seen, weekly, now):
+    """前回見た週間の枠と今を比べ、リセットがあったかを判断する。あれば記録を返す。
+    ・同じ枠のまま使用%が10ポイント以上下がった → いまリセットされた
+    ・次のリセット予定が1日以上先へ跳んだのに、予定の時刻はまだ来ていなかった → 予定より早いリセット
+    （予定どおりの時刻を過ぎた後の切り替わりは、ふだんの週の切り替わりなので数えない）"""
+    if not last_seen or not weekly:
+        return None
+    before_used, before_reset, seen_at = last_seen["used"], last_seen["resetsAt"], last_seen["at"]
+    used, resets_at = float(weekly.get("usedPercent", 0)), weekly.get("resetsAt") or 0
+    jumped = resets_at - before_reset >= 24 * 3600
+    early = jumped and now < before_reset
+    dropped = before_used - used >= 10
+    if early or (dropped and not jumped):
+        # 前回見た時刻からいままでの間に起きた。間が10分以内ならいまの時刻、それより長ければ間の真ん中を目安に
+        at = now if now - seen_at <= 15 * 60 else (seen_at + now) / 2
+        note = "" if now - seen_at <= 15 * 60 else "（パソコンを止めていた間。時刻は目安）"
+        return {"at": at, "source": "local", "by": "このパソコンで検知" + note, "url": ""}
+    return None
+
+
+def ago(sec):
+    sec = max(0, sec)
+    if sec >= 86400:
+        return f"{int(sec // 86400)}日{int(sec % 86400 // 3600)}時間"
+    if sec >= 3600:
+        return f"{int(sec // 3600)}時間"
+    return f"{int(sec // 60)}分"
 
 
 def find_codex():
@@ -338,6 +440,7 @@ class Meter:
         self.x_busy = False
         self.x_retry_pending = False
         self.tip = None
+        self.resets, self.last_seen = load_resets()  # 前回のリセットの蓄積と、前回見た週間の枠
 
         root.overrideredirect(True)
         root.attributes("-topmost", True)
@@ -442,6 +545,7 @@ class Meter:
         if len(self.x_fail) < len(WATCH):
             self.x_last_ok = time.time()
         self.posts = [p for ps in self.x_posts.values() for p in ps]
+        self._add_resets(resets_from_posts(self.posts))
         self.x_busy = False
         if len(self.x_fail) == len(WATCH) and not self.x_retry_pending:
             self.x_retry_pending = True
@@ -473,6 +577,40 @@ class Meter:
         return head, lines
 
 
+    def _add_resets(self, found):
+        merged = merge_resets(self.resets, found)
+        if merged != self.resets:
+            for r in found:
+                if not any(abs(h["at"] - r["at"]) <= SAME_RESET for h in self.resets):
+                    log("リセットを記録: " + time.strftime("%m/%d %H:%M", time.localtime(r["at"])) + " " + r["by"])
+            self.resets = merged
+            save_resets(self.resets, self.last_seen)
+
+    def _check_local_reset(self, res):
+        """このパソコンで見た週間の枠を前回と比べて、リセットを判断する（結果は蓄積へ）。"""
+        weekly = next((w for w in windows_from(res) if w["windowDurationMins"] == 10080), None)
+        if not weekly:
+            return
+        now = time.time()
+        found = detect_local_reset(self.last_seen, weekly, now)
+        self.last_seen = {"used": float(weekly.get("usedPercent", 0)), "resetsAt": weekly.get("resetsAt") or 0, "at": now}
+        if found:
+            self._add_resets([found])
+        else:
+            save_resets(self.resets, self.last_seen)
+
+    def last_reset(self, now):
+        past = [r for r in self.resets if r["at"] <= now + 60]
+        return past[-1] if past else None
+
+    def reset_lines(self, now, n=5):
+        lines = ["これまでのリセット（新しい順）"]
+        for r in reversed(self.resets[-n:]):
+            lines.append(time.strftime("%m/%d %H:%M  ", time.localtime(r["at"])) + "・".join(r.get("sources", [r["by"]])))
+        if len(lines) == 1:
+            lines.append("まだ記録がありません（見つけ次第ここにたまります）")
+        return lines
+
     def refresh(self):
         if self.busy:
             return
@@ -482,6 +620,7 @@ class Meter:
     def _fetch(self):
         try:
             res = self.server.rate_limits()
+            self._check_local_reset(res)
             self.result, self.error, self.updated = res, None, time.time()
         except Exception as ex:  # 前の値のまま表示を続け、印だけ付ける
             self.error = str(ex)
@@ -552,12 +691,29 @@ class Meter:
     def _signal_row(self):
         """合図があるときだけ3行目を出す：「● ﾘｾｯﾄ予告  10/15 13:55  Tibo：Day 10/ Reset」。
         押すと元の投稿を開き、マウスを乗せると直近の根拠を3件まで出す。"""
-        kind, ev, events = signal_state(self.posts, time.time())
+        now = time.time()
+        kind, ev, events = signal_state(self.posts, now)
         self.signal = kind
+        small = (SANS, SIZE - 2)
+        last = self.last_reset(now)
+        last_text = (time.strftime("前回のﾘｾｯﾄ %m/%d %H:%M", time.localtime(last["at"])) + f"（{ago(now - last['at'])}前）"
+                     if last else "前回のﾘｾｯﾄ 記録なし")
         if not kind:
+            # 合図が無いときも、予兆が無いことと前回のリセットを出す（X を一度も読めていないときは出さない）
+            if not self.x_posts and not self.resets:
+                return
+            row = tk.Frame(self.frame, bg=BG)
+            row.pack(anchor="w")
+            lbl = tk.Label(row, text="○ ﾘｾｯﾄ予兆なし（今のところ）　" + last_text, fg=DIM, bg=BG, font=small,
+                           bd=0, padx=0, pady=0)
+            lbl.pack(side="left")
+            lines = self.reset_lines(now)
+            for w in (row, lbl):
+                self._bind(w)
+                w.bind("<Enter>", lambda e: self._show_tip("\n".join(lines), e.x_root, e.y_root), add="+")
+                w.bind("<Leave>", lambda e: self._hide_tip(), add="+")
             return
         label, color = STAGES[kind]
-        small = (SANS, SIZE - 2)
         row = tk.Frame(self.frame, bg=BG, cursor="hand2")
         row.pack(anchor="w")
         text = ev["text"].replace("\n", " ").strip()
@@ -571,6 +727,7 @@ class Meter:
         for e in events[:3]:
             lines.append(time.strftime("%m/%d %H:%M ", time.localtime(e["ts"])) +
                          f"[{names[e['kind']]}] {NAMES.get(e['user'], e['user'])}：" + e["text"].replace("\n", " ")[:60])
+        lines.append(last_text)
         lines.append("押すと元の投稿を開きます")
         widgets = [row]
         for t, c, f in parts:
