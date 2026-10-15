@@ -21,7 +21,7 @@
 #   投稿は非公式の中継サービス FxTwitter（api.fxtwitter.com）で読む。止まったら3行目を出さないだけ。
 #   3行目を押すと元の投稿を開き、マウスを乗せると直近の根拠を出す。
 #
-# 操作：ドラッグで移動（位置は保存）／右クリックで「今すぐ更新」「最前面の切替」「終了」。
+# 操作：ドラッグで移動（位置は保存）／右クリックで「今すぐ更新」「使用量ページを開く」「X を今すぐ読み直す」「常に手前に表示」「終了」。
 # 試験用：--snapshot <png> で描画して画像に保存し、すぐ終了する。
 
 import glob
@@ -352,7 +352,9 @@ class Meter:
         self.menu.add_command(label="今すぐ更新", command=self.refresh)
         self.menu.add_command(label="使用量ページを開く", command=open_usage_page)
         self.menu.add_command(label="X を今すぐ読み直す", command=self.refresh_x)
-        self.menu.add_command(label="最前面の切替", command=self.toggle_top)
+        # 常に手前に表示（ほかのウィンドウの下に隠れない）。オンのときはチェックが付く
+        self.topmost_var = tk.BooleanVar(value=True)
+        self.menu.add_checkbutton(label="常に手前に表示", variable=self.topmost_var, command=self.toggle_top)
         self.menu.add_separator()
         self.menu.add_command(label="終了", command=self.quit)
 
@@ -392,7 +394,8 @@ class Meter:
             self.root.geometry(f"+{e.x_root - self._drag[0]}+{e.y_root - self._drag[1]}")
 
     def toggle_top(self):
-        self.topmost = not self.topmost
+        # メニューのチェック（topmost_var）がすでに切り替わっているので、それに合わせる
+        self.topmost = self.topmost_var.get()
         self.root.attributes("-topmost", self.topmost)
 
     def quit(self):
