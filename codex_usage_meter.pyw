@@ -343,11 +343,15 @@ class Meter:
         if self.error and self.result:
             foot += "  ⚠ 更新失敗（前の値）"
         row = self._row([(foot, DIM, (SANS, SIZE - 2))])
-        # 「使用量ページを開く」はドラッグ用の割り当てを付けず、押したらブラウザで開くだけにする
-        link = tk.Label(row, text="使用量ページを開く", fg=LINK, bg=BG, font=(SANS, SIZE - 2, "underline"),
+        # 「使用量ページを開く」はドラッグ用の割り当てを付けず、押したらブラウザで開くだけにする。
+        # ふだんは周りの文字と同じ色に下線だけ。マウスを乗せている間だけ青系にする。
+        link = tk.Label(row, text="使用量ページを開く", fg=DIM, bg=BG, font=(SANS, SIZE - 2, "underline"),
                         bd=0, padx=0, pady=0, cursor="hand2")
         link.pack(side="left", padx=(12, 0))
+        link.bind("<Enter>", lambda e: link.configure(fg=LINK))
+        link.bind("<Leave>", lambda e: link.configure(fg=DIM))
         link.bind("<Button-1>", lambda e: open_usage_page())
+        self.link = link
         link.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
         self._bind(self.frame)
 
