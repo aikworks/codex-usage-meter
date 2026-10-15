@@ -71,7 +71,8 @@ def log(msg):
 
 
 # ---- リセットの合図（X の投稿） ----
-VERSION = "0.2.0"
+VERSION = "0.2.1"
+REPO_URL = "https://github.com/aikworks/codex-usage-meter"
 # 見るアカウントと役割。official＝予告・実施済の根拠にする（Tibo 氏と OpenAI 公式）。
 # omen＝予兆だけの根拠にする（元Codexリセット予報士 ついはじめ氏の予想・期待のメモ）。
 # Codex 単独の公式アカウントは 2026-10-16 時点で確認できなかった（似た名前は未認証）。見つかったらここに足す。
@@ -345,6 +346,9 @@ class Meter:
         self.frame.pack()
 
         self.menu = tk.Menu(root, tearoff=0)
+        # 版はふだん隠しておき、右クリックの先頭に出す（押すと最新版と更新履歴のページを開く）
+        self.menu.add_command(label=f"Codex 使用量メーター v{VERSION}", command=lambda: webbrowser.open(REPO_URL))
+        self.menu.add_separator()
         self.menu.add_command(label="今すぐ更新", command=self.refresh)
         self.menu.add_command(label="使用量ページを開く", command=open_usage_page)
         self.menu.add_command(label="X を今すぐ読み直す", command=self.refresh_x)
@@ -523,6 +527,11 @@ class Meter:
         if self.error and self.result:
             foot += "  ⚠ 更新失敗（前の値）"
         row = self._row([(foot, DIM, (SANS, SIZE - 2))])
+        # 「Codex」の文字にマウスを乗せたときだけ版を出す
+        first = row.winfo_children()[0]
+        info = f"Codex 使用量メーター v{VERSION}\n最新版と更新履歴：{REPO_URL}"
+        first.bind("<Enter>", lambda e: self._show_tip(info, e.x_root, e.y_root), add="+")
+        first.bind("<Leave>", lambda e: self._hide_tip(), add="+")
         self._signal_row()
         self._problem_row()
         # 「使用量ページを開く」はドラッグ用の割り当てを付けず、押したらブラウザで開くだけにする。
