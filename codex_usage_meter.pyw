@@ -430,8 +430,9 @@ def tray_image(pct, color):
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.rounded_rectangle((2, 2, 61, 61), radius=12, fill=BG, outline="#8a8d96", width=3)
-    h = int(round(52 * max(0, min(100, pct)) / 100))
-    if h:
+    # 量が少なくても色が見えるよう、最低でも高さ12（16px 表示で3px ほど）を塗る
+    h = max(12, int(round(46 * max(0, min(100, pct)) / 100)))
+    if pct > 0:
         d.rounded_rectangle((10, 58 - h, 53, 56), radius=6, fill=color)
     return img
 
