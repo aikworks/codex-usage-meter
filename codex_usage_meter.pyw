@@ -56,10 +56,14 @@ YELLOW = "#e5b73b"
 RED = "#e5534b"
 LINK = "#6cb6ff"
 
-# 使用量ページ。Codex アプリの「設定 > 使用状況と請求」は codex:// のリンクで直接開けない
-# （2026-10 の版でリンクから開ける設定は browser-use・connections など7つだけ）ため、
-# アプリが中で使っているのと同じウェブ版のページを既定のブラウザで開く。
+# 使用量ページ。Codex アプリの「設定 > 使用状況と請求」へ直接飛ぶリンクは無い
+# （26.1007 の版で codex://settings/<名前> が開けるのは browser-use・connections など7つだけ。
+#  codex://browser?url= はアプリ内ブラウザの空タブが出るだけでページが読み込まれなかった。2026-10-16 確認）。
+# そこで Codex アプリがあれば codex://settings で設定を開き、左の「使用状況と請求」を押してもらう。
+# アプリが無ければ、アプリが中で使っているのと同じウェブ版のページを既定のブラウザで開く。
 USAGE_URL = "https://chatgpt.com/codex/settings/usage"
+APP_SETTINGS_URL = "codex://settings"
+USAGE_HINT = "Codex の設定を開きました。左の「使用状況と請求」を押すと使用量が見られます。"
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
 SANS = "Yu Gothic UI" if IS_WIN else ("Hiragino Sans" if IS_MAC else "Noto Sans CJK JP")
@@ -492,8 +496,35 @@ def start_tray(commands):
         return None
 
 
+def codex_app_installed():
+    """Codex アプリ（codex:// のリンクを受けるもの）が入っているか。"""
+    if IS_WIN:
+        # Microsoft Store 版のアプリは shell\open\command を持たず、「URL Protocol」の値だけがある
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "codex") as k:
+                winreg.QueryValueEx(k, "URL Protocol")
+            return True
+        except OSError:
+            return False
+    if IS_MAC:
+        return any(os.path.isdir(p) for p in ("/Applications/Codex.app", os.path.expanduser("~/Applications/Codex.app")))
+    return False
+
+
 def open_usage_page():
+    """Codex アプリがあればアプリの設定を開いて True、無ければウェブ版を開いて False を返す。"""
+    if codex_app_installed():
+        try:
+            if IS_WIN:
+                os.startfile(APP_SETTINGS_URL)
+            else:
+                subprocess.Popen(["open", APP_SETTINGS_URL])
+            return True
+        except OSError as ex:
+            log(f"Codex アプリの設定を開けません: {ex}")
     webbrowser.open(USAGE_URL)
+    return False
 
 
 def label_for(mins):
@@ -587,7 +618,7 @@ class Meter:
         self.menu.add_command(label="", state="disabled")   # 2: X の取得
         self.menu.add_separator()
         self.menu.add_command(label="今すぐ更新", command=self.refresh)
-        self.menu.add_command(label="Codex使用量ページを開く", command=open_usage_page)
+        self.menu.add_command(label="Codex使用量ページを開く", command=self.open_usage)
         self.menu.add_command(label="X を今すぐ読み直す", command=self.refresh_x)
         # 常に手前に表示（ほかのウィンドウの下に隠れない）。オンのときはチェックが付く
         self.topmost_var = tk.BooleanVar(value=True)
@@ -646,6 +677,12 @@ class Meter:
         self.hidden = False
         self._update_tray(windows_from(self.result), time.time())
 
+    def open_usage(self):
+        """Codex の使用量を見る。アプリの設定を開いたときは、どこを押せばよいかを6秒だけ案内する。"""
+        if open_usage_page() and not self.hidden:
+            self._show_tip(USAGE_HINT, 0, 0)
+            self.root.after(6000, self._hide_tip)
+
     def toggle_visible(self):
         self.show() if self.hidden else self.hide()
 
@@ -654,7 +691,7 @@ class Meter:
         while not self.commands.empty():
             cmd = self.commands.get_nowait()
             {"show": self.show, "hide": self.hide, "toggle": self.toggle_visible, "refresh": self.refresh,
-             "usage": open_usage_page, "about": lambda: (self.show(), self.show_about()), "quit": self.quit}.get(cmd, lambda: None)()
+             "usage": self.open_usage, "about": lambda: (self.show(), self.show_about()), "quit": self.quit}.get(cmd, lambda: None)()
         if self.root.winfo_exists():
             self.root.after(200, self._poll_commands)
 
@@ -933,7 +970,7 @@ class Meter:
         link.pack(side="left", padx=(12, 0))
         link.bind("<Enter>", lambda e: link.configure(fg=LINK))
         link.bind("<Leave>", lambda e: link.configure(fg=DIM))
-        link.bind("<Button-1>", lambda e: open_usage_page())
+        link.bind("<Button-1>", lambda e: self.open_usage())
         self.link = link
         self._bind_menu(link)
         self._bind(self.frame)
