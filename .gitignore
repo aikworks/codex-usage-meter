@@ -3,3 +3,5 @@ meter.log
 __pycache__/
 resets.json
 instance.json
+reset_signals.py
+settings.json

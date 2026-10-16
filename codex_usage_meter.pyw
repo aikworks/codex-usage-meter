@@ -13,13 +13,9 @@
 # 枠は返ってきたものだけ表示する（契約によっては週間だけで、5時間枠は返ってこない）。
 # Windows と Mac で動く（Mac は未確認）。自動起動の設定は install.py。
 #
-# リセットの合図（0.2.0）：合図があるときだけ3行目を出す。
-#   ● ﾘｾｯﾄ予兆（紫）  … 元Codexリセット予報士 ついはじめ氏（@hajimetwi3）の予想・期待のメモ
-#   ● ﾘｾｯﾄ予告（水色）… OpenAI の Tibo 氏（@thsottiaux）か OpenAI 公式の予告
-#   ● ﾘｾｯﾄ実施済（緑）… Tibo 氏か OpenAI 公式が実施を告げた投稿（告知から12時間）
-#   それぞれ投稿の時刻と一文を並べる。X の公開投稿を10分ごとに読み、言い回しで見分ける。
-#   投稿は非公式の中継サービス FxTwitter（api.fxtwitter.com）で読む。止まったら3行目を出さないだけ。
-#   3行目を押すと元の投稿を開き、マウスを乗せると直近の根拠を出す。
+# 3行目（0.2.2〜）：前回のリセットの時刻と経過。このパソコンで見たリセットを resets.json に蓄積して出す。
+#   道場版だけの追加機能「リセットの合図」（別ファイル reset_signals.py。一般配布には含めない）があれば、
+#   リセットの予兆・予告・実施の合図もこの行に出す。中身と参照先はそのファイルに書いてある。
 #
 # 起動・隠す・終了（0.2.4）：
 #   Windows … ログイン時に自動起動。スタートメニューの「Codex 使用量メーター」からも起動できる（install.py が登録）。
@@ -81,141 +77,54 @@ def log(msg):
         pass
 
 
-# ---- リセットの合図（X の投稿） ----
-VERSION = "0.2.4"
+# ---- 版・作者 ----
+VERSION = "0.2.5"
 AUTHOR = "野村勇樹（生成AI共創道場）"
 REPO_URL = "https://github.com/aikworks/codex-usage-meter"
-# 見るアカウントと役割。official＝予告・実施済の根拠にする（Tibo 氏と OpenAI 公式）。
-# omen＝予兆だけの根拠にする（元Codexリセット予報士 ついはじめ氏の予想・期待のメモ）。
-# Codex 単独の公式アカウントは 2026-10-16 時点で確認できなかった（似た名前は未認証）。見つかったらここに足す。
-WATCH = (
-    ("thsottiaux", "Tibo", "official"),
-    ("OpenAI", "OpenAI", "official"),
-    ("OpenAIDevs", "OpenAI Developers", "official"),
-    ("hajimetwi3", "ついはじめ", "omen"),
-)
-NAMES = {u: n for u, n, _ in WATCH}
-ROLES = {u: r for u, _, r in WATCH}
-X_POLL_MS = 10 * 60_000
-SIGNAL_WINDOW = 24 * 3600   # この時間より古い投稿は見ない
-DONE_SHOW = 12 * 3600       # 実施済は、実施の告知から12時間だけ出す
-TEAL = "#4fc3d9"
-LAVENDER = "#b39ddb"
-STAGES = {"omen": ("ﾘｾｯﾄ予兆", LAVENDER), "notice": ("ﾘｾｯﾄ予告", TEAL), "done": ("ﾘｾｯﾄ実施済", GREEN)}
-# 言い回し（2026-10-10〜15 の実際の投稿から）。新しい言い方が出たらここに足す。
-DONE_RE = re.compile(r"it'?s done|all propagated|in the bag|has been reset|limits (have been|were) reset|"
-                     r"reset (is |has )?(done|live|complete|landed|rolled out)", re.I)
-NOTICE_RE = re.compile(r"day\s*\d+\s*/\s*reset|global reset|"
-                       r"reset (landing|by eod|incoming|coming|today|tonight|soon)|resetting", re.I)
-NONE_RE = re.compile(r"リセット\s*(ﾅｼ|ナシ|無し|なし)", re.I)
-OMEN_RE = re.compile(r"予想|予報|予兆|祈|ｸﾙ|クル|来そう|来る|くる|予定|期待", re.I)
-OMEN_NOT_RE = re.compile(r"実施済|ｷﾀ|キタ|検知", re.I)  # 起きた後の報告・振り返りは予兆にしない
+
+# ---- リセットの合図（道場版だけの追加機能） ----
+# X の投稿からリセットの予兆・予告・実施を出す機能は、別ファイル reset_signals.py にある（道場の配布物にだけ同梱）。
+# ファイルが無ければ合図は出さない（一般配布の版）。道場版でも settings.json に {"reset_signals": false} と書けば止まる。
+SETTINGS = os.path.join(HERE, "settings.json")
 
 
-def classify(text, user):
-    """投稿1件を done／notice／omen／none／None（無関係）に分ける。どれに使えるかはアカウントの役割で決まる。"""
-    role = ROLES.get(user)
-    if NONE_RE.search(text):
-        return "none"
-    if role == "official":
-        if DONE_RE.search(text):
-            return "done"
-        if NOTICE_RE.search(text):
-            return "notice"
-    elif role == "omen":
-        if "リセット" in text and OMEN_RE.search(text) and not OMEN_NOT_RE.search(text):
-            return "omen"
-    return None
+def load_settings():
+    try:
+        with open(SETTINGS, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
 
 
-def fetch_posts(user, timeout=20):
-    import urllib.request
-    from email.utils import parsedate_to_datetime
-    url = f"https://api.fxtwitter.com/2/profile/{user}/statuses?count=20"
-    req = urllib.request.Request(url, headers={"User-Agent": f"codex-usage-meter/{VERSION}"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.load(r)
-    posts = []
-    for p in data.get("results") or []:
-        ts = p.get("created_timestamp")
-        if not ts and p.get("created_at"):
-            try:  # "Thu Oct 15 04:55:51 +0000 2026" 形式
-                parts = p["created_at"].split()
-                ts = parsedate_to_datetime(" ".join(parts[:4] + [parts[5], parts[4]])).timestamp()
-            except (ValueError, IndexError):
-                ts = None
-        if ts:
-            posts.append({"ts": float(ts), "text": p.get("text", ""), "url": p.get("url", ""), "user": user})
-    return posts
+try:
+    import reset_signals as _rs
+except ImportError:
+    _rs = None
+SIGNALS = _rs is not None and load_settings().get("reset_signals", True) is not False
+if SIGNALS:
+    WATCH, NAMES, ROLES, STAGES = _rs.WATCH, _rs.NAMES, _rs.ROLES, _rs.STAGES
+    X_POLL_MS, SIGNAL_WINDOW = _rs.X_POLL_MS, _rs.SIGNAL_WINDOW
+    classify, fetch_posts, signal_state, resets_from_posts = (
+        _rs.classify, _rs.fetch_posts, _rs.signal_state, _rs.resets_from_posts)
+else:
+    WATCH, NAMES, ROLES, STAGES = (), {}, {}, {}
+    X_POLL_MS, SIGNAL_WINDOW = 10 * 60_000, 24 * 3600
 
+    def signal_state(posts, now):
+        return None, None, []
 
-def signal_state(posts, now):
-    """合図を決める。戻り値 (kind, event, events)。
-    kind は "done"／"notice"／"omen"／None、event は表示する根拠の投稿、events は新しい順の根拠一覧。"""
-    events = []
-    for p in posts:
-        if now - SIGNAL_WINDOW <= p["ts"] <= now + 600:
-            k = classify(p["text"], p["user"])
-            if k:
-                events.append(dict(p, kind=k))
-    events.sort(key=lambda e: -e["ts"])
-
-    def last(kind):
-        return next((e for e in events if e["kind"] == kind), None)
-
-    done, notice, omen, none = last("done"), last("notice"), last("omen"), last("none")
-    t = lambda e: e["ts"] if e else 0  # noqa: E731
-    if done and t(done) >= max(t(notice), t(omen)):
-        # 実施済は「予告の後に最初に出た実施の告知」の時刻で出す（後の振り返り投稿で延ばさない）。
-        first = min((e for e in events if e["kind"] == "done" and e["ts"] >= t(notice)), key=lambda e: e["ts"])
-        # 12時間たつか、「今日はリセット無し」が後から出たら消す
-        if now - first["ts"] <= DONE_SHOW and t(none) < first["ts"]:
-            return "done", first, events
-        return None, None, events
-    if notice and t(notice) > t(done) and t(notice) > t(none):
-        return "notice", notice, events
-    if omen and t(omen) > max(t(done), t(none)):
-        return "omen", omen, events
-    return None, None, events
+    def resets_from_posts(posts):
+        return []
 
 
 # ---- 前回のリセット（蓄積） ----
 # resets.json に、確かめたリセットを積み上げていく（消さない）。拾う元：
-#   detect …ついはじめ氏の「検知時刻 10/15 15:13 JST」など時刻つきの報告（いちばん正確）
-#   local  …このパソコンで、使用%の大きな低下や次のリセット予定の跳びから判断（ついはじめ氏と同じやり方）
-#   official … Tibo 氏・OpenAI 公式の実施の告知（告知した時刻）
+#   detect …（道場版）時刻つきのリセット検知の報告（いちばん正確）
+#   local  …このパソコンで、使用%の大きな低下や次のリセット予定の跳びから判断
+#   official …（道場版）実施の告知（告知した時刻）
 RESETS = os.path.join(HERE, "resets.json")
 SOURCE_RANK = {"detect": 0, "local": 1, "official": 2}
 SAME_RESET = 3 * 3600  # 3時間以内の記録は同じリセットとみなしてまとめる
-JST = None
-DETECT_RE = re.compile(r"(?:検知時刻|日本時間)\D{0,4}(\d{1,2})/(\d{1,2})\D{0,6}?(\d{1,2}):(\d{2})")
-
-
-def _jst():
-    global JST
-    if JST is None:
-        from datetime import timedelta, timezone
-        JST = timezone(timedelta(hours=9))
-    return JST
-
-
-def resets_from_posts(posts):
-    """投稿からリセットの記録を拾う（ついはじめ氏の時刻つきの報告と、公式の実施の告知）。"""
-    from datetime import datetime
-    found = []
-    for p in posts:
-        text = p["text"]
-        if p["user"] == "hajimetwi3" and ("検知時刻" in text or "リセット実施済" in text):
-            m = DETECT_RE.search(text)
-            if m:
-                year = datetime.fromtimestamp(p["ts"], _jst()).year
-                at = datetime(year, int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)),
-                              tzinfo=_jst()).timestamp()
-                if at <= p["ts"] + 600:  # 投稿より後の時刻（予定など）は記録にしない
-                    found.append({"at": at, "source": "detect", "by": "ついはじめ氏の検知", "url": p["url"]})
-        elif ROLES.get(p["user"]) == "official" and classify(text, p["user"]) == "done":
-            found.append({"at": p["ts"], "source": "official", "by": f"{NAMES[p['user']]}の告知", "url": p["url"]})
-    return found
 
 
 def merge_resets(history, new):
@@ -615,11 +524,13 @@ class Meter:
         self.menu.add_command(label=f"Codex 使用量メーター v{VERSION}", command=lambda: webbrowser.open(REPO_URL))
         # 最終データ取得の時刻（メニューを開くたびに書き換える。押しても何もしない）
         self.menu.add_command(label="", state="disabled")   # 1: 使用量の取得
-        self.menu.add_command(label="", state="disabled")   # 2: X の取得
+        if SIGNALS:
+            self.menu.add_command(label="", state="disabled")   # 2: X の取得（道場版だけ）
         self.menu.add_separator()
         self.menu.add_command(label="今すぐ更新", command=self.refresh)
         self.menu.add_command(label="Codex使用量ページを開く", command=self.open_usage)
-        self.menu.add_command(label="X を今すぐ読み直す", command=self.refresh_x)
+        if SIGNALS:
+            self.menu.add_command(label="X を今すぐ読み直す", command=self.refresh_x)
         # 常に手前に表示（ほかのウィンドウの下に隠れない）。オンのときはチェックが付く
         self.topmost_var = tk.BooleanVar(value=True)
         self.menu.add_checkbutton(label="常に手前に表示", variable=self.topmost_var, command=self.toggle_top)
@@ -703,7 +614,8 @@ class Meter:
     def refresh_menu_labels(self):
         fmt = lambda t: time.strftime("%m/%d %H:%M:%S", time.localtime(t)) if t else "まだ"  # noqa: E731
         self.menu.entryconfigure(1, label=f"　使用量の最終取得：{fmt(self.updated)}" + ("（失敗中）" if self.error else ""))
-        self.menu.entryconfigure(2, label=f"　X の最終取得：{fmt(self.x_last_ok)}" + ("（一部失敗）" if self.x_fail else ""))
+        if SIGNALS:
+            self.menu.entryconfigure(2, label=f"　X の最終取得：{fmt(self.x_last_ok)}" + ("（一部失敗）" if self.x_fail else ""))
 
     def show_about(self):
         """「作者について」：作者・版・ライセンス・参照先のクレジットを小さな窓で出す（閉じるまで出したまま）。"""
@@ -723,14 +635,13 @@ class Meter:
             (f"作者：{AUTHOR}", FG, (SANS, SIZE - 1), None),
             ("ライセンス：MIT（無保証）", DIM, (SANS, SIZE - 2), None),
             (REPO_URL, LINK, (SANS, SIZE - 2, "underline"), REPO_URL),
-            ("", DIM, (SANS, 4), None),
-            ("リセットの合図で参照している X のアカウント（敬称略）", DIM, (SANS, SIZE - 2), None),
         ]
-        for user, name, role in WATCH:
-            rows.append((f"  {name}（@{user}）　{'予告・実施済' if role == 'official' else '予兆'}", DIM, (SANS, SIZE - 2),
-                         f"https://x.com/{user}"))
+        if SIGNALS:  # 道場版の「リセットの合図」の参照先とクレジットは、合図のファイル側が持つ
+            rows.append(("", DIM, (SANS, 4), None))
+            for text, url in _rs.CREDITS:
+                rows.append((text, DIM, (SANS, SIZE - 2), url))
         rows += [
-            ("投稿の読み込み：FxTwitter（api.fxtwitter.com、非公式の無料中継サービス）", DIM, (SANS, SIZE - 2), None),
+            ("", DIM, (SANS, 4), None),
             ("Codex・ChatGPT は OpenAI の製品です。このツールは OpenAI 公式のものではありません。", DIM, (SANS, SIZE - 2), None),
         ]
         for text, color, font, url in rows:
@@ -770,6 +681,8 @@ class Meter:
         self.root.after(REFRESH_MS, self.schedule)
 
     def schedule_x(self):
+        if not SIGNALS:  # 一般配布の版（合図のファイルが無い）では X を読まない
+            return
         self.refresh_x()
         self.root.after(X_POLL_MS, self.schedule_x)
 
@@ -832,7 +745,7 @@ class Meter:
         if self.x_last_ok:
             lines.append("最後に読めた時刻：" + time.strftime("%m/%d %H:%M", time.localtime(self.x_last_ok)))
         lines.append("10分ごと（全部止まっている間は2分後にも）自動で読み直します。押すと今すぐ読み直します。")
-        lines.append("長く続くときは、中継サービス（FxTwitter）の停止・仕様変更か、アカウント名の変更が考えられます。")
+        lines.append("長く続くときは、読み込み先の中継サービスの停止・仕様変更か、アカウント名の変更が考えられます。")
         return head, lines
 
 
@@ -976,7 +889,7 @@ class Meter:
         self._bind(self.frame)
 
     def _signal_row(self):
-        """合図があるときだけ3行目を出す：「● ﾘｾｯﾄ予告  10/15 13:55  Tibo：Day 10/ Reset」。
+        """合図があるときだけ3行目を出す：「● ﾘｾｯﾄ予告  時刻  誰か：投稿の一文」。
         押すと元の投稿を開き、マウスを乗せると直近の根拠を3件まで出す。"""
         now = time.time()
         kind, ev, events = signal_state(self.posts, now)
@@ -986,6 +899,20 @@ class Meter:
         # この行は余白があるので全角で書く（合図の短い表示「ﾘｾｯﾄ予告」などは半角のまま）
         last_text = (time.strftime("前回のリセット %m/%d %H:%M", time.localtime(last["at"])) + f"（{ago(now - last['at'])}前）"
                      if last else "前回のリセット 記録なし")
+        if not SIGNALS:
+            # 一般配布の版：このパソコンで見つけた前回のリセットだけを出す（まだ記録が無ければ行を出さない）
+            if not self.resets:
+                return
+            row = tk.Frame(self.frame, bg=BG)
+            row.pack(anchor="w")
+            self._bind(row)
+            lbl = tk.Label(row, text="○ " + last_text, fg=DIM, bg=BG, font=small, bd=0, padx=0, pady=0)
+            lbl.pack(side="left")
+            self._bind(lbl)
+            lines = self.reset_lines(now)
+            lbl.bind("<Enter>", lambda e: self._show_tip("\n".join(lines), e.x_root, e.y_root), add="+")
+            lbl.bind("<Leave>", lambda e: self._hide_tip(), add="+")
+            return
         if not kind:
             # 合図が無いときも、予兆が無いことと前回のリセットを出す（X を一度も読めていないときは出さない）
             if not self.x_posts and not self.resets:
