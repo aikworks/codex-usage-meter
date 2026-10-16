@@ -424,8 +424,20 @@ def claim_single_instance(on_command):
 
 
 # ---- タスクトレイのアイコン（Windows。pystray が無ければ出さないだけ） ----
+def _icon_font(size):
+    from PIL import ImageFont
+    for path in (r"C:\Windows\Fonts\segoeuib.ttf", r"C:\Windows\Fonts\arialbd.ttf",
+                 "/System/Library/Fonts/Supplemental/Arial Bold.ttf", "/Library/Fonts/Arial Bold.ttf"):
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
 def tray_image(pct, color):
-    """週間の使用%の量と色を描いた小さなアイコン。"""
+    """週間の使用%の量と色を描き、Codex の「C」を重ねた小さなアイコン。
+    「Codex」「Cx」は 16px でつぶれて読めないため、1文字の「C」にした（2026-10-16 に 16/24/32px で見比べ）。"""
     from PIL import Image, ImageDraw
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -433,7 +445,10 @@ def tray_image(pct, color):
     # 量が少なくても色が見えるよう、最低でも高さ12（16px 表示で3px ほど）を塗る
     h = max(12, int(round(46 * max(0, min(100, pct)) / 100)))
     if pct > 0:
-        d.rounded_rectangle((10, 58 - h, 53, 56), radius=6, fill=color)
+        d.rounded_rectangle((10, 56 - h, 53, 56), radius=6, fill=color)
+    f = _icon_font(46)
+    l, t, r, b = d.textbbox((0, 0), "C", font=f)
+    d.text(((64 - (r - l)) / 2 - l, (64 - (b - t)) / 2 - t - 1), "C", font=f, fill="white", stroke_width=4, stroke_fill=BG)
     return img
 
 
