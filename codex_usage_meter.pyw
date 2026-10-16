@@ -71,7 +71,8 @@ def log(msg):
 
 
 # ---- リセットの合図（X の投稿） ----
-VERSION = "0.2.2"
+VERSION = "0.2.3"
+AUTHOR = "野村勇樹（生成AI共創道場）"
 REPO_URL = "https://github.com/aikworks/codex-usage-meter"
 # 見るアカウントと役割。official＝予告・実施済の根拠にする（Tibo 氏と OpenAI 公式）。
 # omen＝予兆だけの根拠にする（元Codexリセット予報士 ついはじめ氏の予想・期待のメモ）。
@@ -451,14 +452,18 @@ class Meter:
         self.menu = tk.Menu(root, tearoff=0)
         # 版はふだん隠しておき、右クリックの先頭に出す（押すと最新版と更新履歴のページを開く）
         self.menu.add_command(label=f"Codex 使用量メーター v{VERSION}", command=lambda: webbrowser.open(REPO_URL))
+        # 最終データ取得の時刻（メニューを開くたびに書き換える。押しても何もしない）
+        self.menu.add_command(label="", state="disabled")   # 1: 使用量の取得
+        self.menu.add_command(label="", state="disabled")   # 2: X の取得
         self.menu.add_separator()
         self.menu.add_command(label="今すぐ更新", command=self.refresh)
-        self.menu.add_command(label="使用量ページを開く", command=open_usage_page)
+        self.menu.add_command(label="Codex使用量ページを開く", command=open_usage_page)
         self.menu.add_command(label="X を今すぐ読み直す", command=self.refresh_x)
         # 常に手前に表示（ほかのウィンドウの下に隠れない）。オンのときはチェックが付く
         self.topmost_var = tk.BooleanVar(value=True)
         self.menu.add_checkbutton(label="常に手前に表示", variable=self.topmost_var, command=self.toggle_top)
         self.menu.add_separator()
+        self.menu.add_command(label="作者について", command=self.show_about)
         self.menu.add_command(label="終了", command=self.quit)
 
         self._drag = None
@@ -487,7 +492,58 @@ class Meter:
         w.bind("<ButtonPress-1>", self._press)
         w.bind("<B1-Motion>", self._move)
         w.bind("<ButtonRelease-1>", lambda e: self._save_pos())
-        w.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
+        w.bind("<Button-3>", self.popup_menu)
+
+    def popup_menu(self, e):
+        """右クリックのメニューを開く。版の下の「最終データ取得」をいまの値に書き換えてから出す。"""
+        self.refresh_menu_labels()
+        self.menu.tk_popup(e.x_root, e.y_root)
+
+    def refresh_menu_labels(self):
+        fmt = lambda t: time.strftime("%m/%d %H:%M:%S", time.localtime(t)) if t else "まだ"  # noqa: E731
+        self.menu.entryconfigure(1, label=f"　使用量の最終取得：{fmt(self.updated)}" + ("（失敗中）" if self.error else ""))
+        self.menu.entryconfigure(2, label=f"　X の最終取得：{fmt(self.x_last_ok)}" + ("（一部失敗）" if self.x_fail else ""))
+
+    def show_about(self):
+        """「作者について」：作者・版・ライセンス・参照先のクレジットを小さな窓で出す（閉じるまで出したまま）。"""
+        if getattr(self, "about", None) is not None and self.about.winfo_exists():
+            self.about.lift()
+            return
+        win = tk.Toplevel(self.root)
+        win.title("作者について")
+        win.configure(bg=BG)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        self.about = win
+        body = tk.Frame(win, bg=BG, padx=16, pady=12)
+        body.pack()
+        rows = [
+            (f"Codex 使用量メーター v{VERSION}", FG, (SANS, SIZE, "bold"), None),
+            (f"作者：{AUTHOR}", FG, (SANS, SIZE - 1), None),
+            ("ライセンス：MIT（無保証）", DIM, (SANS, SIZE - 2), None),
+            (REPO_URL, LINK, (SANS, SIZE - 2, "underline"), REPO_URL),
+            ("", DIM, (SANS, 4), None),
+            ("リセットの合図で参照している X のアカウント（敬称略）", DIM, (SANS, SIZE - 2), None),
+        ]
+        for user, name, role in WATCH:
+            rows.append((f"  {name}（@{user}）　{'予告・実施済' if role == 'official' else '予兆'}", DIM, (SANS, SIZE - 2),
+                         f"https://x.com/{user}"))
+        rows += [
+            ("投稿の読み込み：FxTwitter（api.fxtwitter.com、非公式の無料中継サービス）", DIM, (SANS, SIZE - 2), None),
+            ("Codex・ChatGPT は OpenAI の製品です。このツールは OpenAI 公式のものではありません。", DIM, (SANS, SIZE - 2), None),
+        ]
+        for text, color, font, url in rows:
+            lbl = tk.Label(body, text=text, fg=color, bg=BG, font=font, anchor="w", justify="left",
+                           cursor="hand2" if url else "")
+            lbl.pack(anchor="w")
+            if url:
+                lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+        tk.Button(body, text="閉じる", command=win.destroy, relief="flat", bg="#2b2d33", fg=FG,
+                  activebackground="#3a3d45", activeforeground=FG, padx=12).pack(anchor="e", pady=(10, 0))
+        win.update_idletasks()
+        x = min(self.root.winfo_rootx(), self.root.winfo_screenwidth() - win.winfo_width() - 8)
+        y = max(0, self.root.winfo_rooty() - win.winfo_height() - 8)
+        win.geometry(f"+{max(0, x)}+{y}")
 
     def _press(self, e):
         self._drag = (e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y())
@@ -603,6 +659,19 @@ class Meter:
         past = [r for r in self.resets if r["at"] <= now + 60]
         return past[-1] if past else None
 
+    def x_status_lines(self, now):
+        """X の読み込み状況（「（今のところ）」に乗せたときに出す）。"""
+        fmt = lambda t: time.strftime("%m/%d %H:%M", time.localtime(t))  # noqa: E731
+        lines = ["X の最終取得：" + (fmt(self.x_last_ok) + f"（{ago(now - self.x_last_ok)}前）" if self.x_last_ok else "まだ")
+                 + "　10分ごとに読み直します"]
+        for user, name, _ in WATCH:
+            if user in self.x_fail:
+                lines.append(f"  @{user}（{name}）：読めていません（{fmt(self.x_fail[user]['since'])}から）")
+            else:
+                latest = max((p["ts"] for p in self.x_posts.get(user, [])), default=None)
+                lines.append(f"  @{user}（{name}）：OK" + (f"　最新の投稿 {fmt(latest)}" if latest else ""))
+        return lines
+
     def reset_lines(self, now, n=5):
         lines = ["これまでのリセット（新しい順）"]
         for r in reversed(self.resets[-n:]):
@@ -678,14 +747,14 @@ class Meter:
         self._problem_row()
         # 「使用量ページを開く」はドラッグ用の割り当てを付けず、押したらブラウザで開くだけにする。
         # ふだんは周りの文字と同じ色に下線だけ。マウスを乗せている間だけ青系にする。
-        link = tk.Label(row, text="使用量ページを開く", fg=DIM, bg=BG, font=(SANS, SIZE - 2, "underline"),
+        link = tk.Label(row, text="Codex使用量ページを開く", fg=DIM, bg=BG, font=(SANS, SIZE - 2, "underline"),
                         bd=0, padx=0, pady=0, cursor="hand2")
         link.pack(side="left", padx=(12, 0))
         link.bind("<Enter>", lambda e: link.configure(fg=LINK))
         link.bind("<Leave>", lambda e: link.configure(fg=DIM))
         link.bind("<Button-1>", lambda e: open_usage_page())
         self.link = link
-        link.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
+        link.bind("<Button-3>", self.popup_menu)
         self._bind(self.frame)
 
     def _signal_row(self):
@@ -696,22 +765,25 @@ class Meter:
         self.signal = kind
         small = (SANS, SIZE - 2)
         last = self.last_reset(now)
-        last_text = (time.strftime("前回のﾘｾｯﾄ %m/%d %H:%M", time.localtime(last["at"])) + f"（{ago(now - last['at'])}前）"
-                     if last else "前回のﾘｾｯﾄ 記録なし")
+        # この行は余白があるので全角で書く（合図の短い表示「ﾘｾｯﾄ予告」などは半角のまま）
+        last_text = (time.strftime("前回のリセット %m/%d %H:%M", time.localtime(last["at"])) + f"（{ago(now - last['at'])}前）"
+                     if last else "前回のリセット 記録なし")
         if not kind:
             # 合図が無いときも、予兆が無いことと前回のリセットを出す（X を一度も読めていないときは出さない）
             if not self.x_posts and not self.resets:
                 return
             row = tk.Frame(self.frame, bg=BG)
             row.pack(anchor="w")
-            lbl = tk.Label(row, text="○ ﾘｾｯﾄ予兆なし（今のところ）　" + last_text, fg=DIM, bg=BG, font=small,
-                           bd=0, padx=0, pady=0)
-            lbl.pack(side="left")
-            lines = self.reset_lines(now)
-            for w in (row, lbl):
-                self._bind(w)
-                w.bind("<Enter>", lambda e: self._show_tip("\n".join(lines), e.x_root, e.y_root), add="+")
-                w.bind("<Leave>", lambda e: self._hide_tip(), add="+")
+            self._bind(row)
+            # 「（今のところ）」に乗せると X の読み込み状況、「前回のリセット」に乗せるとリセットの履歴
+            for text, tip in (("○ リセット予兆なし", None), ("（今のところ）", self.x_status_lines(now)),
+                              ("　" + last_text, self.reset_lines(now))):
+                lbl = tk.Label(row, text=text, fg=DIM, bg=BG, font=small, bd=0, padx=0, pady=0)
+                lbl.pack(side="left")
+                self._bind(lbl)
+                if tip:
+                    lbl.bind("<Enter>", lambda e, t=tip: self._show_tip("\n".join(t), e.x_root, e.y_root), add="+")
+                    lbl.bind("<Leave>", lambda e: self._hide_tip(), add="+")
             return
         label, color = STAGES[kind]
         row = tk.Frame(self.frame, bg=BG, cursor="hand2")
@@ -738,7 +810,7 @@ class Meter:
             w.bind("<Enter>", lambda e: self._show_tip("\n".join(lines), e.x_root, e.y_root))
             w.bind("<Leave>", lambda e: self._hide_tip())
             w.bind("<Button-1>", lambda e, u=ev["url"]: webbrowser.open(u))
-            w.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
+            w.bind("<Button-3>", self.popup_menu)
 
     def _problem_row(self):
         """X の読み込みの不調を黄色の小さな1行で知らせる。押すと今すぐ読み直す。"""
@@ -754,7 +826,7 @@ class Meter:
             w.bind("<Enter>", lambda e: self._show_tip("\n".join(lines), e.x_root, e.y_root))
             w.bind("<Leave>", lambda e: self._hide_tip())
             w.bind("<Button-1>", lambda e: self.refresh_x())
-            w.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
+            w.bind("<Button-3>", self.popup_menu)
 
     def _show_tip(self, text, x, y):
         self._hide_tip()
