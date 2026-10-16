@@ -21,6 +21,13 @@
 #   投稿は非公式の中継サービス FxTwitter（api.fxtwitter.com）で読む。止まったら3行目を出さないだけ。
 #   3行目を押すと元の投稿を開き、マウスを乗せると直近の根拠を出す。
 #
+# 起動・隠す・終了（0.2.4）：
+#   Windows … ログイン時に自動起動。スタートメニューの「Codex 使用量メーター」からも起動できる（install.py が登録）。
+#             タスクトレイ（画面右下の通知領域）にアイコンが出て、押すと隠す／表示。アイコンの量と色は週間の使用%。
+#   Mac     … ログイン時に自動起動。アプリケーションの「Codex 使用量メーター」からも起動できる（install.py が作る）。
+#             隠したら Dock のアイコンを押すと出る。右クリックは2本指クリックか Control＋クリック。
+#   2つ目を起動したときは立ち上げず、動いている方を表に出す。
+#
 # 操作：ドラッグで移動（位置は保存）／右クリックで「今すぐ更新」「使用量ページを開く」「X を今すぐ読み直す」「常に手前に表示」「終了」。
 # 試験用：--snapshot <png> で描画して画像に保存し、すぐ終了する。
 
@@ -71,7 +78,7 @@ def log(msg):
 
 
 # ---- リセットの合図（X の投稿） ----
-VERSION = "0.2.3"
+VERSION = "0.2.4"
 AUTHOR = "野村勇樹（生成AI共創道場）"
 REPO_URL = "https://github.com/aikworks/codex-usage-meter"
 # 見るアカウントと役割。official＝予告・実施済の根拠にする（Tibo 氏と OpenAI 公式）。
@@ -365,6 +372,110 @@ class AppServer:
         self.proc = None
 
 
+# ---- 二重起動の防止（2つ目は、動いている方に「表に出して」と伝えて終わる） ----
+# 待ち受けの番号は決め打ちしない。WSL のミラー方式などが一時的な通信に使う番号の範囲（例 44620〜48715）と
+# ぶつかると「もう動いている」と勘違いして起動できなくなるため（2026-10-16 に 47613 で発生）。
+# 空いている番号を OS に選ばせ、instance.json に書いておく。2つ目はその番号に送り、届かなければ自分が起動する。
+INSTANCE_FILE = os.path.join(HERE, "instance.json")
+INSTANCE_COMMANDS = {b"show", b"hide", b"toggle", b"refresh", b"quit"}
+
+
+def send_command(word):
+    """動いているメーターに指示を送る（試験・2つ目の起動用）。届けば True。"""
+    import socket
+    try:
+        with open(INSTANCE_FILE, encoding="utf-8") as f:
+            port = int(json.load(f)["port"])
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as c:
+            c.sendall(word.encode())
+        return True
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+def claim_single_instance(on_command):
+    """1つ目なら待ち受けを始めて True。すでに動いていれば表示を頼んで False。
+    待ち受けは 127.0.0.1（このパソコンの中だけ）で、決まった指示（INSTANCE_COMMANDS）しか受けない。"""
+    import socket
+    if send_command("show"):
+        return False
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))  # 空いている番号を OS に選ばせる
+    srv.listen(2)
+    try:
+        with open(INSTANCE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"port": srv.getsockname()[1], "pid": os.getpid()}, f)
+    except OSError:
+        pass  # 書けなくても本体は動かす（二重起動の防止が効かないだけ）
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+                with conn:
+                    word = conn.recv(16).strip()
+                    if word in INSTANCE_COMMANDS:
+                        on_command(word.decode())
+            except OSError:
+                return
+
+    threading.Thread(target=serve, daemon=True).start()
+    return True
+
+
+# ---- タスクトレイのアイコン（Windows。pystray が無ければ出さないだけ） ----
+def tray_image(pct, color):
+    """週間の使用%の量と色を描いた小さなアイコン。"""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((2, 2, 61, 61), radius=12, fill=BG, outline="#8a8d96", width=3)
+    h = int(round(52 * max(0, min(100, pct)) / 100))
+    if h:
+        d.rounded_rectangle((10, 58 - h, 53, 56), radius=6, fill=color)
+    return img
+
+
+class Tray:
+    def __init__(self, commands):
+        import pystray
+        self.commands = commands
+        put = lambda c: (lambda icon, item: commands.put(c))  # noqa: E731
+        menu = pystray.Menu(
+            pystray.MenuItem("表示／隠す", put("toggle"), default=True),  # アイコンを押したときもこれ
+            pystray.MenuItem("今すぐ更新", put("refresh")),
+            pystray.MenuItem("Codex使用量ページを開く", put("usage")),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("作者について", put("about")),
+            pystray.MenuItem("終了", put("quit")),
+        )
+        self.icon = pystray.Icon("codex-usage-meter", tray_image(0, DIM), f"Codex 使用量メーター v{VERSION}", menu)
+        self.icon.run_detached()
+
+    def update(self, pct, color, title):
+        try:
+            self.icon.icon = tray_image(pct, color)
+            self.icon.title = title[:120]
+        except Exception:  # アイコンの更新に失敗しても本体は動かし続ける
+            pass
+
+    def stop(self):
+        try:
+            self.icon.stop()
+        except Exception:
+            pass
+
+
+def start_tray(commands):
+    if IS_MAC:
+        return None  # Mac は Dock のアイコンから出し直す（メニューバー常駐は Tk と同時に動かせないため使わない）
+    try:
+        return Tray(commands)
+    except Exception as ex:
+        log(f"タスクトレイのアイコンを出せません（pystray 未導入など）: {ex}")
+        return None
+
+
 def open_usage_page():
     webbrowser.open(USAGE_URL)
 
@@ -442,12 +553,15 @@ class Meter:
         self.x_retry_pending = False
         self.tip = None
         self.resets, self.last_seen = load_resets()  # 前回のリセットの蓄積と、前回見た週間の枠
+        self.hidden = False
+        self.tray = None
+        import queue
+        self.commands = queue.Queue()  # タスクトレイ・2つ目の起動からの指示
 
         root.overrideredirect(True)
         root.attributes("-topmost", True)
         root.configure(bg=BG)
-        self.frame = tk.Frame(root, bg=BG, padx=10, pady=6)
-        self.frame.pack()
+        self.frame = None  # 表示の入れ物。render() のたびに作り直して、古い方と差し替える
 
         self.menu = tk.Menu(root, tearoff=0)
         # 版はふだん隠しておき、右クリックの先頭に出す（押すと最新版と更新履歴のページを開く）
@@ -462,6 +576,9 @@ class Meter:
         # 常に手前に表示（ほかのウィンドウの下に隠れない）。オンのときはチェックが付く
         self.topmost_var = tk.BooleanVar(value=True)
         self.menu.add_checkbutton(label="常に手前に表示", variable=self.topmost_var, command=self.toggle_top)
+        # 隠す：Windows はタスクトレイのアイコン、Mac は Dock のアイコンから出し直す
+        self.menu.add_command(label="隠す（Dock のアイコンで再表示）" if IS_MAC else "隠す（タスクトレイのアイコンで再表示）",
+                              command=self.hide)
         self.menu.add_separator()
         self.menu.add_command(label="作者について", command=self.show_about)
         self.menu.add_command(label="終了", command=self.quit)
@@ -492,7 +609,38 @@ class Meter:
         w.bind("<ButtonPress-1>", self._press)
         w.bind("<B1-Motion>", self._move)
         w.bind("<ButtonRelease-1>", lambda e: self._save_pos())
-        w.bind("<Button-3>", self.popup_menu)
+        self._bind_menu(w)
+
+    def _bind_menu(self, w):
+        # 右クリック。Mac の Tk では右ボタンが2番として届くことがあるので、2番と Control＋クリックも受ける
+        for seq in (("<Button-2>", "<Button-3>", "<Control-Button-1>") if IS_MAC else ("<Button-3>",)):
+            w.bind(seq, self.popup_menu)
+
+    # ---- 隠す・表示（タスクトレイ・Dock から） ----
+    def hide(self):
+        self._hide_tip()
+        self.root.withdraw()
+        self.hidden = True
+        self._update_tray(windows_from(self.result), time.time())
+
+    def show(self):
+        self.root.deiconify()
+        self.root.attributes("-topmost", self.topmost_var.get())
+        self.root.lift()
+        self.hidden = False
+        self._update_tray(windows_from(self.result), time.time())
+
+    def toggle_visible(self):
+        self.show() if self.hidden else self.hide()
+
+    def _poll_commands(self):
+        """タスクトレイや2つ目の起動からの指示を、画面の担当（Tk）の側で実行する。"""
+        while not self.commands.empty():
+            cmd = self.commands.get_nowait()
+            {"show": self.show, "hide": self.hide, "toggle": self.toggle_visible, "refresh": self.refresh,
+             "usage": open_usage_page, "about": lambda: (self.show(), self.show_about()), "quit": self.quit}.get(cmd, lambda: None)()
+        if self.root.winfo_exists():
+            self.root.after(200, self._poll_commands)
 
     def popup_menu(self, e):
         """右クリックのメニューを開く。版の下の「最終データ取得」をいまの値に書き換えてから出す。"""
@@ -559,6 +707,8 @@ class Meter:
 
     def quit(self):
         self.server.close()
+        if self.tray is not None:
+            self.tray.stop()
         self.root.destroy()
 
     # ---- 更新 ----
@@ -699,8 +849,22 @@ class Meter:
 
     # ---- 描画 ----
     def render(self):
-        for c in self.frame.winfo_children():
-            c.destroy()
+        # ちらつき対策（0.2.4）：古い表示を消してから作ると、消えた瞬間に窓が空・縮んで見える。
+        # 新しい入れ物を古い表示の上に重ねて作り切ってから、窓の大きさを合わせ、古い方を消す。
+        old = self.frame
+        self.frame = tk.Frame(self.root, bg=BG, padx=10, pady=6)
+        self._build()
+        self.frame.update_idletasks()
+        w, h = self.frame.winfo_reqwidth(), self.frame.winfo_reqheight()
+        self.frame.place(x=0, y=0)
+        # 位置は窓に指定済みの値を使う（起動直後はまだ画面に出ておらず winfo_x が 0 のため）
+        m = re.match(r"\d+x\d+([+-]-?\d+)([+-]-?\d+)", self.root.geometry())
+        pos = f"{m.group(1)}{m.group(2)}" if m else ""
+        self.root.geometry(f"{w}x{h}{pos}")
+        if old is not None:
+            old.destroy()
+
+    def _build(self):
         now = time.time()
         wins = windows_from(self.result)
         if not wins:
@@ -745,6 +909,7 @@ class Meter:
         first.bind("<Leave>", lambda e: self._hide_tip(), add="+")
         self._signal_row()
         self._problem_row()
+        self._update_tray(wins, now)
         # 「使用量ページを開く」はドラッグ用の割り当てを付けず、押したらブラウザで開くだけにする。
         # ふだんは周りの文字と同じ色に下線だけ。マウスを乗せている間だけ青系にする。
         link = tk.Label(row, text="Codex使用量ページを開く", fg=DIM, bg=BG, font=(SANS, SIZE - 2, "underline"),
@@ -754,7 +919,7 @@ class Meter:
         link.bind("<Leave>", lambda e: link.configure(fg=DIM))
         link.bind("<Button-1>", lambda e: open_usage_page())
         self.link = link
-        link.bind("<Button-3>", self.popup_menu)
+        self._bind_menu(link)
         self._bind(self.frame)
 
     def _signal_row(self):
@@ -810,7 +975,20 @@ class Meter:
             w.bind("<Enter>", lambda e: self._show_tip("\n".join(lines), e.x_root, e.y_root))
             w.bind("<Leave>", lambda e: self._hide_tip())
             w.bind("<Button-1>", lambda e, u=ev["url"]: webbrowser.open(u))
-            w.bind("<Button-3>", self.popup_menu)
+            self._bind_menu(w)
+
+    def _update_tray(self, wins, now):
+        """タスクトレイのアイコンを、週間の使用%の量と色に合わせる。マウスを乗せたときの文も更新する。"""
+        if self.tray is None:
+            return
+        if not wins:
+            self.tray.update(0, DIM, f"Codex 使用量メーター v{VERSION}（取得中）")
+            return
+        w = wins[0]
+        pct = max(0, min(100, float(w.get("usedPercent", 0))))
+        title = (f"Codex {label_for(w['windowDurationMins'])} {round(pct)}%・リセットまで {remaining(w.get('resetsAt'), now)}"
+                 + ("（隠れています。押すと表示）" if self.hidden else ""))
+        self.tray.update(pct, color_for(pct), title)
 
     def _problem_row(self):
         """X の読み込みの不調を黄色の小さな1行で知らせる。押すと今すぐ読み直す。"""
@@ -826,7 +1004,7 @@ class Meter:
             w.bind("<Enter>", lambda e: self._show_tip("\n".join(lines), e.x_root, e.y_root))
             w.bind("<Leave>", lambda e: self._hide_tip())
             w.bind("<Button-1>", lambda e: self.refresh_x())
-            w.bind("<Button-3>", self.popup_menu)
+            self._bind_menu(w)
 
     def _show_tip(self, text, x, y):
         self._hide_tip()
@@ -869,9 +1047,15 @@ def main():
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except (AttributeError, OSError):
         pass
+    import queue
+    commands = queue.Queue()
+    # すでに動いていれば、そちらを表に出して終わる（スタートメニュー等から2回起動したとき）
+    if not snapshot and not claim_single_instance(commands.put):
+        return
     root = tk.Tk()
     root.title("Codex Usage Meter")
     meter = Meter(root)
+    meter.commands = commands
     if snapshot:
         meter._fetch()
         root.update()
@@ -884,6 +1068,13 @@ def main():
         ImageGrab.grab((x, y, x + root.winfo_width(), y + root.winfo_height())).save(snapshot)
         meter.quit()
         return
+    meter.tray = start_tray(commands)
+    if IS_MAC:
+        try:  # Dock のアイコンを押したら、隠していたメーターを出す
+            root.createcommand("::tk::mac::ReopenApplication", meter.show)
+        except tk.TclError:
+            pass
+    root.after(200, meter._poll_commands)
     root.after(200, meter.schedule)
     root.after(1500, meter.schedule_x)
     root.mainloop()
